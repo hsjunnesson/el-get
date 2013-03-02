@@ -22,6 +22,7 @@
 ;;
 
 (require 'el-get-core)
+(require 'el-get-byte-compile)
 
 (defcustom el-get-recipe-path-emacswiki
   (concat (file-name-directory el-get-dir) "el-get/recipes/emacswiki/")
@@ -29,10 +30,22 @@
   :group 'el-get
   :type 'directory)
 
+(defcustom el-get-recipe-path-elpa
+  (concat (file-name-directory el-get-dir) "el-get/recipes/elpa/")
+  "Define where to keep a local copy of elpa recipes"
+  :group 'el-get
+  :type 'directory)
+
+
 (defcustom el-get-recipe-path
   (list (concat (file-name-directory el-get-script) "recipes")
-	el-get-recipe-path-emacswiki)
-  "Define where to look for the recipes, that's a list of directories"
+        el-get-recipe-path-elpa
+        el-get-recipe-path-emacswiki)
+  "List of directories in which to look for el-get recipes.
+
+Directories that contain automatically-generated recipes, such as
+`el-get-recipe-path-emacswiki' and `el-get-recipe-path-elpa',
+should be placed last in this list."
   :group 'el-get
   :type '(repeat (directory)))
 
@@ -44,13 +57,21 @@
 (defun el-get-load-package-user-init-file (package)
   "Load the user init file for PACKAGE, called init-package.el
 and to be found in `el-get-user-package-directory'.  Do nothing
-when this custom is nil."
+when this custom is nil.
+
+Will automatically compile the init file as needed and load the
+compiled version."
   (when el-get-user-package-directory
-    (let* ((init-file-name    (format "init-%s.el" package))
+    (let* ((init-file-name (format "init-%s.el" package))
 	   (package-init-file
-	    (expand-file-name init-file-name el-get-user-package-directory)))
-      (el-get-verbose-message "el-get: load %S" package-init-file)
-      (load package-init-file 'noerror))))
+	    (expand-file-name init-file-name el-get-user-package-directory))
+	   (file-name-no-extension (file-name-sans-extension package-init-file))
+	   (compiled-init-file (concat file-name-no-extension ".elc")))
+      (when (file-exists-p package-init-file)
+	(when el-get-byte-compile
+	  (el-get-byte-compile-file package-init-file))
+	(el-get-verbose-message "el-get: load %S" file-name-no-extension)
+	(load file-name-no-extension 'noerror)))))
 
 (defun el-get-recipe-dirs ()
   "Return the elements of el-get-recipe-path that actually exist.
@@ -94,23 +115,36 @@ Used to avoid errors when exploring the path for recipes"
 	(el-get-read-recipe-file filename)
       (error "el-get can not find a recipe for package \"%s\"." package))))
 
-(defun el-get-read-all-recipes ()
-  "Return the list of all the recipes, formatted like `el-get-sources'.
+(defun el-get-read-all-recipe-files ()
+  "Return the list of all the file based recipes, formated like
+   `el-get-sources'
 
 Only consider any given recipe only once even if present in
 multiple dirs from `el-get-recipe-path'. The first recipe found
-is the one considered.  We first look in `el-get-sources' then in
-each directory listed in `el-get-recipe-path' in order."
+is the one considered."
+  (let (packages)
+    (loop
+     for dir in (el-get-recipe-dirs)
+     nconc (loop
+            for recipe in (directory-files dir nil "^[^.].*\.\\(rcp\\|el\\)$")
+            for filename = (concat (file-name-as-directory dir) recipe)
+            for pname = (file-name-sans-extension
+                         (file-name-nondirectory recipe))
+            for package = (el-get-as-symbol pname)
+            unless (member package packages)
+            do (push package packages)
+            and collect (ignore-errors (el-get-read-recipe-file filename))))))
+
+(defun el-get-read-all-recipes ()
+  "Return the list of all the recipes, formatted like `el-get-sources'.
+
+  We first look in `el-get-sources' then in each directory listed
+in `el-get-recipe-path' in order."
   (let ((packages (mapcar 'el-get-source-name el-get-sources)))
     (append
      el-get-sources
-     (loop for dir in (el-get-recipe-dirs)
-	   nconc (loop for recipe in (directory-files dir nil "^[^.].*\.\\(rcp\\|el\\)$")
-		       for filename = (concat (file-name-as-directory dir) recipe)
-		       for package = (file-name-sans-extension (file-name-nondirectory recipe))
-		       unless (member package packages)
-		       do (push package packages)
-                       and collect (ignore-errors (el-get-read-recipe-file filename)))))))
+     (remove-if (lambda (recipe) (member (el-get-source-name recipe) packages))
+                (el-get-read-all-recipe-files)))))
 
 (defun el-get-package-def (package)
   "Return a single `el-get-sources' entry for PACKAGE."
@@ -165,5 +199,125 @@ which defaults to installed, required and removed.  Example:
 	for type = (el-get-package-type name)
 	when (or (null types) (memq 'all types) (memq type types))
 	collect (cons name type)))
+
+(defun el-get-package-required-emacs-version (package-or-source)
+  (let* ((def (if (or (symbolp package-or-source) (stringp package-or-source))
+                  (el-get-package-def package-or-source)
+                package-or-source)))
+    (el-get-plist-get-with-default
+        def :minimum-emacs-version
+      0)))
+
+(defun el-get-version-to-list (version)
+  "Convert VERSION to a standard version list.
+
+Like the builtin `version-to-list', this function accepts a
+string. Unlike the builtin, it will also accept a single number,
+which will be wrapped into a single-element list, or a or a list
+of numbers, which will be returned unmodified."
+  (cond
+   ;; String
+   ((stringp version)
+    (version-to-list version))
+   ;; Single number
+   ((numberp version)
+    (list version))
+   ;; List of numbers
+   ((and (listp version)
+         (null (remove-if 'numberp version)))
+    version)
+   (t (error "Unrecognized version specification: %S" version))))
+
+(defun el-get-error-unless-required-emacs-version (package-or-source)
+  "Raise an error if `emacs-major-version' is less than package's requirement.
+
+Second argument PACKAGE is optional and only used to construct the error message."
+  (let* ((pname (el-get-source-name package-or-source))
+         (required-version (el-get-package-required-emacs-version package-or-source))
+         (required-version-list (el-get-version-to-list required-version)))
+    (when (version-list-< (version-to-list emacs-version) required-version-list)
+      (error "Package %s requires Emacs version %s or higher, but the current emacs is only version %s"
+             pname required-version emacs-version))))
+
+(defun el-get-envpath-prepend (envname head)
+  "Prepend HEAD in colon-separated environment variable ENVNAME.
+This is effectively the same as doing the following in shell:
+    export ENVNAME=HEAD:$ENVNAME
+
+Use this to modify environment variable such as $PATH or $PYTHONPATH."
+  (setenv envname (el-get-envpath-prepend-1 (getenv envname) head)))
+
+(defun el-get-envpath-prepend-1 (paths head)
+  "Return \"HEAD:PATHS\" omitting duplicates in it."
+  (let ((pplist (split-string (or paths "") ":" 'omit-nulls)))
+    (mapconcat 'identity
+               (remove-duplicates (cons head pplist)
+                                  :test #'string= :from-end t)
+               ":")))
+
+(defun el-get-check-recipe (file-or-buffer)
+  "Check the format of the recipe.
+Please run this command before sending a pull request.
+Usage: M-x el-get-check-recipe RET
+
+You can run this function from checker script like this:
+    test/check-recipe.el PATH/TO/RECIPE.rcp
+
+When used as a lisp function, FILE-OR-BUFFER must be a buffer
+object or a file path."
+  (interactive (list (current-buffer)))
+  (if (bufferp file-or-buffer)
+      (with-current-buffer file-or-buffer
+        (el-get-check-recipe-in-current-buffer))
+    (with-temp-buffer
+      (erase-buffer)
+      (insert-file-contents file-or-buffer)
+      (el-get-check-recipe-in-current-buffer))))
+
+(defun el-get-check-recipe-in-current-buffer ()
+  (let ((recipe (save-excursion
+                  (goto-char (point-min))
+                  (read (current-buffer))))
+        (numerror 0)
+        (buffer (get-buffer-create "*el-get check recipe*")))
+    (display-buffer buffer)
+    (with-current-buffer buffer
+      (erase-buffer)
+      ;; Check if userspace property is used.
+      (loop for key in '(:before :after)
+            for alt in '(:prepare :post-init)
+            when (plist-get recipe key)
+            do (progn
+                 (insert (format
+                          "* Property %S is for user.  Use %S instead.\n"
+                          key alt))
+                 (incf numerror)))
+      (destructuring-bind (&key type url autoloads features
+                                &allow-other-keys)
+          recipe
+        ;; Is github type used?
+        (when (and (eq type 'git) (string-match "//github.com/" url))
+          (insert "* Use `:type github' for github type recipe\n")
+          (incf numerror))
+        ;; Warn when `:autoloads nil' is specified.
+        (when (and (null autoloads) (plist-member recipe :autoloads))
+          (insert "* WARNING: Are you sure you don't need autoloads?
+  This property should be used only when the library takes care of
+  the autoload.\n"))
+        ;; Warn when `:features t' is specified
+        (when features
+          (insert "* WARNING: Are you sure you need features?
+  If this library has `;;;###autoload' comment (a.k.a autoload cookie),
+  you don't need `:features'.\n")))
+      ;; Check for required properties.
+      (loop for key in '(:description :name)
+            unless (plist-get recipe key)
+            do (progn
+                 (insert (format
+                          "* Required property %S is not defined.\n"
+                          key))
+                 (incf numerror)))
+      (insert (format "%s error(s) found." numerror)))
+    numerror))
 
 (provide 'el-get-recipes)

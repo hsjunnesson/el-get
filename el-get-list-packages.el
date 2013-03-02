@@ -16,6 +16,9 @@
 ;;
 ;; Description of packages.  (Code based on `describe-function').
 ;;
+(require 'el-get-core)
+(require 'cl)
+
 (define-button-type 'el-get-help-package-def
   :supertype 'help-xref
   'help-function (lambda (package) (find-file (el-get-recipe-filename package)))
@@ -64,11 +67,11 @@ matching REGEX with TYPE and ARGS as parameter."
       (re-search-backward regex nil t)
       (apply #'help-xref-button 1 type args))))
 
-(defun el-get-guess-github-website (url)
-  "If a package's URL is on Github, return the project's Github URL."
-  (when (and url (string-match "github\\.com/" url))
-    (replace-regexp-in-string "\\.git$" ""
-                              (replace-regexp-in-string "\\(git\\|https\\)://" "http://" url))))
+(defun el-get-guess-website (package)
+  (let* ((type (el-get-package-type package))
+         (guesser (el-get-method type :guess-website)))
+    (when guesser
+      (funcall guesser package))))
 
 (defun el-get-describe-1 (package)
   (let* ((psym (el-get-as-symbol package))
@@ -99,7 +102,7 @@ matching REGEX with TYPE and ARGS as parameter."
     (princ ".\n\n")
 
     (let ((website (or website
-                       (and (eq 'git type) (el-get-guess-github-website url)))))
+                       (el-get-guess-website package))))
       (when website
         (el-get-describe-princ-button (format "Website: %s\n" website)
                                       ": \\(.+\\)" 'help-url website)))
@@ -127,7 +130,7 @@ matching REGEX with TYPE and ARGS as parameter."
         (el-get-describe-princ-button (format " in `%s':\n" file)
                                       "`\\([^`']+\\)"
                                       'el-get-help-package-def package)))
-    (prin1 def)))
+    (princ (el-get-print-to-string def))))
 
 (defun el-get-describe (package)
   "Generate a description for PACKAGE."
@@ -144,6 +147,13 @@ matching REGEX with TYPE and ARGS as parameter."
         (el-get-describe-1 package)
         (with-current-buffer standard-output
           (buffer-string))))))
+
+(defcustom el-get-package-menu-view-recipe-function
+  'find-file-other-window
+  "`find-file' compatible function used to display recipe content
+in el-get package menu."
+  :group 'el-get
+  :type 'symbol)
 
 
 ;;
@@ -163,6 +173,14 @@ matching REGEX with TYPE and ARGS as parameter."
     (beginning-of-line)
     (if (looking-at ". \\([^ \t]*\\)")
 		(match-string 1))))
+
+(defun el-get-package-menu-view-recipe ()
+  "Show package recipe in a read-only mode."
+  (interactive)
+  (let* ((package (el-get-package-menu-get-package-name))
+         (recipe-file (el-get-recipe-filename package)))
+    (funcall el-get-package-menu-view-recipe-function recipe-file)
+    (view-mode)))
 
 (defun el-get-package-menu-get-status ()
   (save-excursion
@@ -239,7 +257,7 @@ matching REGEX with TYPE and ARGS as parameter."
 
 (defun el-get-package-menu-quick-help ()
   (interactive)
-  (message "n-ext, p-revious, i-nstall, u-pdate, d-elete, SPC-unmark, g-revert, x-execute, ?-package describe, h-elp, q-uit"))
+  (message "n-ext, p-revious, i-nstall, u-pdate, d-elete, SPC-unmark, g-revert, x-execute, ?-package describe, v-iew recipe, h-elp, q-uit"))
 
 (unless el-get-package-menu-mode-map
   (setq el-get-package-menu-mode-map (make-keymap))
@@ -253,6 +271,7 @@ matching REGEX with TYPE and ARGS as parameter."
   (define-key el-get-package-menu-mode-map "g" 'el-get-package-menu-revert)
   (define-key el-get-package-menu-mode-map "x" 'el-get-package-menu-execute)
   (define-key el-get-package-menu-mode-map "?" 'el-get-package-menu-describe)
+  (define-key el-get-package-menu-mode-map "v" 'el-get-package-menu-view-recipe)
   (define-key el-get-package-menu-mode-map "h" 'el-get-package-menu-quick-help)
   (define-key el-get-package-menu-mode-map "q" 'quit-window))
 
@@ -300,7 +319,7 @@ matching REGEX with TYPE and ARGS as parameter."
 					   ((string= el-get-package-menu-sort-key "Status")
 						#'(lambda (package)
 							(let ((package-name (el-get-as-string (plist-get package :name))))
-							  (el-get-package-status package-name))))
+							  (el-get-read-package-status package-name))))
 					   ((string= el-get-package-menu-sort-key "Description")
 						#'(lambda (package)
 							(plist-get package :description)))
@@ -316,7 +335,7 @@ matching REGEX with TYPE and ARGS as parameter."
 	  (mapc (lambda (package)
 			  (let ((package-name (el-get-as-string (plist-get package :name))))
 				(el-get-print-package package-name
-									  (el-get-package-status package-name)
+									  (el-get-read-package-status package-name)
 									  (plist-get package :description))))
 			packages))
 	(goto-char (point-min))
